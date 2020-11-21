@@ -57,6 +57,7 @@ func (r *Server) Call(server string, fnName string, params ...interface{}) (inte
 	ps := make([]interface{}, 0, len(params))
 	ps = append(ps, s)
 	ps = append(ps, params...)
+
 	vs, err := rreflect.Call(fv, ps)
 	if err != nil {
 		return nil, err

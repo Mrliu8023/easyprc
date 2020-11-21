@@ -4,14 +4,14 @@ import (
 	"easyrpc"
 	"fmt"
 	"log"
-	"time"
 )
 
 func main() {
-	for i := 0; i < 10; i++ {
-		go hello()
-	}
-	<-time.After(10 * time.Second)
+	//for i := 0; i < 10; i++ {
+	//	go hello()
+	//}
+	//<-time.After(10 * time.Second)
+	hello()
 }
 
 func hello() {
@@ -20,7 +20,7 @@ func hello() {
 		log.Fatal(err)
 	}
 	//params := []string{"laowang"}
-	err := c.Call("Hello", "SayHello", nil, "laowang")
+	err := c.Call("Hello", "SayHello", nil, 1)
 	if err != nil {
 		fmt.Println("Call error: ", err)
 	}

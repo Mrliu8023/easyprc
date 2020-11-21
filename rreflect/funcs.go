@@ -16,18 +16,23 @@ func GetAllFn(s interface{}) (int, map[string]reflect.Value) {
 	return sv.NumMethod(), mMap
 }
 
-func Call(value reflect.Value, params []interface{}) ([]interface{}, error) {
+// Call encapsulats reflect.Value.Call and deal panic.
+func Call(value reflect.Value, params []interface{}) (results []interface{}, err error) {
 	ps := make([]reflect.Value, 0, len(params))
 	for _, p := range params {
 		ps = append(ps, reflect.ValueOf(p))
 	}
+
+	results = make([]interface{}, 0, 1)
+	defer func() {
+		if x := recover(); x != nil {
+			err = fmt.Errorf("call error: %+v", x)
+		}
+	}()
+
 	vs := value.Call(ps)
-	if err := recover(); err != nil {
-		return nil, fmt.Errorf("call error: %+v", err)
-	}
-	results := make([]interface{}, 0, len(vs))
 	for _, r := range vs {
 		results = append(results, r.Interface())
 	}
-	return results, nil
+	return results, err
 }
