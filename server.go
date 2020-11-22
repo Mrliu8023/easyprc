@@ -31,6 +31,7 @@ type Server struct {
 	servers map[string]interface{}
 	funcs   map[string]reflect.Value
 	l       net.Listener
+	times   int64
 }
 
 func (r *Server) Rigist(name string, server interface{}) error {
@@ -88,10 +89,9 @@ func (r *Server) StartServer() error {
 	}
 }
 
-const headerLength = 8
+const headerLength = 20
 
 func (r *Server) serve(conn net.Conn) {
-	// TODO Multiplexing
 	defer func() {
 		conn.Close()
 		log.Printf("connect with %s closed\n", conn.RemoteAddr().String())
@@ -102,6 +102,7 @@ func (r *Server) serve(conn net.Conn) {
 	}()
 
 	for {
+		r.times += 1
 		header := make([]byte, headerLength)
 		_, err := conn.Read(header)
 		if err != nil {
@@ -109,72 +110,83 @@ func (r *Server) serve(conn net.Conn) {
 				break
 			}
 			log.Printf("rpc error: %s\n", err)
-			r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
+			r.dealErr(conn, r.times, fmt.Sprintf("rpc error: %s", err))
 			return
 		}
-		h, err := r.resolveHeader(header)
-		if err != nil {
-			log.Printf("rpc error: %s\n", err)
-			r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
-			return
-		}
-		head := make([]byte, h.headLength)
-		_, err = conn.Read(head)
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			log.Printf("rpc error: %s\n", err)
-			r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
-			return
-		}
-		strs := strings.Split(string(head), ".")
-		if len(strs) != 2 {
-			log.Printf("rpc error: resolveHeader error: bad request\n")
-			r.dealErr(conn, "rpc error: resolveHeader error: bad request")
-			return
-		}
-		h.server = strs[0]
-		h.fnName = strs[1]
-
-		body := make([]byte, h.bodyLength)
-		_, err = conn.Read(body)
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			log.Printf("rpc error: %s\n", err)
-			r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
-			return
-		}
-		params := make([]interface{}, 0)
-		if len(body) != 0 {
-			if err := json.Unmarshal(body, &params); err != nil {
-				log.Printf("rpc error: %s\n", err)
-				r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
-				return
-			}
-		}
-		v, err := r.Call(h.server, h.fnName, params...)
-		if err != nil {
-			log.Printf("rpc error: %s\n", err)
-			r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
-			// 业务调用失败，可以继续
-			continue
-		}
-		r.dealResp(conn, v)
+		r.servehandle(conn, header)
 	}
 
+}
+
+func (r *Server) servehandle(conn net.Conn, header []byte) {
+	h, err := r.resolveHeader(header)
+	if err != nil {
+		log.Printf("rpc error: %s\n", err)
+		r.dealErr(conn, r.times, fmt.Sprintf("rpc error: %s", err))
+		return
+	}
+	head := make([]byte, h.headLength)
+	_, err = conn.Read(head)
+	if err != nil {
+		if err == io.EOF {
+			return
+		}
+		log.Printf("rpc error: %s\n", err)
+		r.dealErr(conn, h.reqID, fmt.Sprintf("rpc error: %s", err))
+		return
+	}
+	strs := strings.Split(string(head), ".")
+	if len(strs) != 2 {
+		log.Printf("rpc error: resolveHeader error: bad request\n")
+		r.dealErr(conn, h.reqID, "rpc error: resolveHeader error: bad request")
+		return
+	}
+	h.server = strs[0]
+	h.fnName = strs[1]
+
+	body := make([]byte, h.bodyLength)
+	_, err = conn.Read(body)
+	if err != nil {
+		if err == io.EOF {
+			return
+		}
+		log.Printf("rpc error: %s\n", err)
+		r.dealErr(conn, h.reqID, fmt.Sprintf("rpc error: %s", err))
+		return
+	}
+	go r.workHandle(conn, h, body)
+}
+
+func (r *Server) workHandle(conn net.Conn, h *header, body []byte) {
+	params := make([]interface{}, 0)
+	if len(body) != 0 {
+		if err := json.Unmarshal(body, &params); err != nil {
+			log.Printf("rpc error: %s\n", err)
+			r.dealErr(conn, h.reqID, fmt.Sprintf("rpc error: %s", err))
+			return
+		}
+	}
+
+	v, err := r.Call(h.server, h.fnName, params...)
+	if err != nil {
+		log.Printf("rpc error: %s\n", err)
+		r.dealErr(conn, h.reqID, fmt.Sprintf("rpc error: %s", err))
+		return
+		// 业务调用失败，可以继续
+	}
+	r.dealResp(conn, h.reqID, v)
 }
 
 type header struct {
 	bodyLength int64
 	headLength int64
+	reqID      int64
 	server     string
 	fnName     string
 }
 
 func (r *Server) resolveHeader(hb []byte) (*header, error) {
+	// log.Println("recv ", hb)
 	length, err := strconv.ParseInt(string(hb[:2]), 16, 64)
 	if err != nil {
 		return nil, err
@@ -182,12 +194,16 @@ func (r *Server) resolveHeader(hb []byte) (*header, error) {
 	h := &header{}
 	h.bodyLength = length
 
-	length, err = strconv.ParseInt(string(hb[2:]), 16, 64)
+	reqID, err := strconv.ParseInt(string(hb[2:10]), 16, 64)
+	if err != nil {
+		return nil, err
+	}
+	h.reqID = reqID
+	length, err = strconv.ParseInt(string(hb[10:]), 16, 64)
 	if err != nil {
 		return nil, err
 	}
 	h.headLength = length
-
 	return h, nil
 }
 
@@ -195,39 +211,44 @@ func (r *Server) buildFuncName(server, fnName string) string {
 	return server + "." + fnName
 }
 
-func (r *Server) dealErr(conn net.Conn, errMsg string) {
+func (r *Server) dealErr(conn net.Conn, reqID int64, errMsg string) {
 	r1 := fmt.Sprintf("%x", 1)
+	r2 := fmt.Sprintf("%08x", reqID)
 	r3 := []byte(errMsg)
-	r2 := fmt.Sprintf("%07x", len(r3))
+	rresp := fmt.Sprintf("%011x", len(r3))
 
 	b := make([]byte, 0, headerLength+len(r3))
 	b = append(b, []byte(r1)...)
 	b = append(b, []byte(r2)...)
+	b = append(b, []byte(rresp)...)
 	b = append(b, r3...)
 
 	_, err := conn.Write(b)
 	if err != nil {
 		log.Printf("rpc err: %s", err)
 	}
+	// log.Println("send: ", b, " ", len(b))
 }
-func (r *Server) dealResp(conn net.Conn, v interface{}) {
+func (r *Server) dealResp(conn net.Conn, reqID int64, v interface{}) {
 	r1 := fmt.Sprintf("%x", 0)
-
+	r2 := fmt.Sprintf("%08x", reqID)
 	resp, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("rpc error: %s\n", err)
-		r.dealErr(conn, fmt.Sprintf("rpc error: %s", err))
+		r.dealErr(conn, reqID, fmt.Sprintf("rpc error: %s", err))
 		return
 	}
-	r2 := fmt.Sprintf("%07x", len(resp))
+	r3 := fmt.Sprintf("%011x", len(resp))
 
 	b := make([]byte, 0, headerLength+len(resp))
 	b = append(b, []byte(r1)...)
 	b = append(b, []byte(r2)...)
+	b = append(b, []byte(r3)...)
 	b = append(b, resp...)
 
 	_, err = conn.Write(b)
 	if err != nil {
 		log.Printf("rpc err: %s", err)
 	}
+	//log.Println("send: ", b, " ", len(b))
 }

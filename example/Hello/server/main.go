@@ -3,11 +3,13 @@ package main
 import (
 	"easyrpc"
 	"log"
+	"time"
 )
 
 type Hello struct{}
 
 func (h *Hello) SayHello(name string) {
+	<-time.After(500 * time.Millisecond)
 	log.Println("Hello ", name)
 }
 
